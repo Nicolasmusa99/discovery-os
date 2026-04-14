@@ -8,7 +8,6 @@ export const config = {
 
 // ── PDF size limit ────────────────────────────────────────
 const MAX_PDF_BYTES = 150 * 1024;
-
 function pdfTooLarge(body) {
   try {
     for (const msg of body?.messages || []) {
@@ -20,67 +19,6 @@ function pdfTooLarge(body) {
     }
   } catch {}
   return false;
-}
-
-// ── Convertir formato Anthropic → Gemini ─────────────────
-function toGeminiMessages(messages, system) {
-  const contents = [];
-  if (system) {
-    contents.push({ role: "user",  parts: [{ text: `[INSTRUCCIONES]\n${system}` }] });
-    contents.push({ role: "model", parts: [{ text: "Entendido." }] });
-  }
-  for (const msg of messages) {
-    const role = msg.role === "assistant" ? "model" : "user";
-    let text = "";
-    if (typeof msg.content === "string") {
-      text = msg.content;
-    } else if (Array.isArray(msg.content)) {
-      text = msg.content.filter(b => b.type === "text").map(b => b.text).join("\n");
-    }
-    if (text.trim()) contents.push({ role, parts: [{ text }] });
-  }
-  return contents;
-}
-
-// ── Llamada a Gemini con retry automático ─────────────────
-async function callGemini(apiKey, body, retries = 3) {
-  const { messages, system, max_tokens } = body;
-  const contents = toGeminiMessages(messages, system);
-
-  for (let attempt = 0; attempt < retries; attempt++) {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents,
-          generationConfig: {
-            maxOutputTokens: max_tokens || 1000,
-            temperature: 0.7,
-          },
-        }),
-      }
-    );
-
-    // Si es 429, esperamos y reintentamos
-    if (response.status === 429) {
-      const waitMs = (attempt + 1) * 5000; // 5s, 10s, 15s
-      await new Promise(r => setTimeout(r, waitMs));
-      continue;
-    }
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data?.error?.message || `Error ${response.status}`);
-    }
-
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    return text;
-  }
-
-  throw new Error("El servicio está ocupado. Esperá unos segundos e intentá de nuevo.");
 }
 
 // ── Handler ───────────────────────────────────────────────
@@ -96,16 +34,51 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "El PDF es demasiado grande. Máximo 3 páginas." });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
+    return res.status(500).json({ error: "GROQ_API_KEY not configured" });
   }
 
   try {
-    const text = await callGemini(apiKey, req.body);
+    const { messages, system, max_tokens } = req.body;
+
+    // Groq usa el mismo formato que OpenAI
+    const groqMessages = [];
+    if (system) groqMessages.push({ role: "system", content: system });
+    for (const m of messages || []) {
+      const content = typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? m.content.filter(b => b.type === "text").map(b => b.text).join("\n")
+          : "";
+      if (content.trim()) groqMessages.push({ role: m.role, content });
+    }
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: groqMessages,
+        max_tokens: max_tokens || 1000,
+        temperature: 0.7,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data?.error?.message || `Error ${response.status}` });
+    }
+
+    const text = data.choices?.[0]?.message?.content || "";
     return res.status(200).json({
       content: [{ type: "text", text }],
     });
+
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
