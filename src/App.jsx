@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 
-const ANTHROPIC_API = "/api/claude";
-const ANTHROPIC_HEADERS = {
+const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_KEY = "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";
+const GROQ_HEADERS = {
   "Content-Type": "application/json",
+  "Authorization": "Bearer " + GROQ_KEY,
 };
 
 const STEPS = [
@@ -182,14 +184,14 @@ export default function DiscoveryOS() {
     const stepObj = STEPS[stepIndex];
     setLoading(true);
     try {
-      const res = await fetch(ANTHROPIC_API, {
+      const res = await fetch(GROQ_API, {
         method: "POST",
-        headers: ANTHROPIC_HEADERS,
+        headers: GROQ_HEADERS,
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "llama-3.3-70b-versatile",
           max_tokens: 800,
-          system: buildSystemPrompt(stepObj.id, stepObj.label, initiative.docContext),
           messages: [
+            { role: "system", content: buildSystemPrompt(stepObj.id, stepObj.label, initiative.docContext) },
             ...currentMsgs.slice(-6).map(m => ({ role: m.role, content: m.content })),
             { role: "user", content: `Analizá el bloque "${stepObj.label}" basándote en el documento. Presentá un borrador de lo que ya sabés y preguntá solo lo que falta.` },
           ],
@@ -197,7 +199,7 @@ export default function DiscoveryOS() {
       });
       if (!res.ok) throw new Error(`Error ${res.status}`);
       const data = await res.json();
-      const text = data.content?.[0]?.text || "";
+      const text = data.choices?.[0]?.message?.content || data.content?.[0]?.text || "";
       const isListo = text.includes("[LISTO]");
       const clean = text.replace("[LISTO]", "").trim();
 
@@ -239,14 +241,16 @@ export default function DiscoveryOS() {
     setLoading(true);
 
     try {
-      const res = await fetch(ANTHROPIC_API, {
+      const res = await fetch(GROQ_API, {
         method: "POST",
-        headers: ANTHROPIC_HEADERS,
+        headers: GROQ_HEADERS,
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "llama-3.3-70b-versatile",
           max_tokens: 800,
-          system: buildSystemPrompt(stepObj.id, stepObj.label, current.docContext),
-          messages: next.slice(-8).map(m => ({ role: m.role, content: m.content })),
+          messages: [
+            { role: "system", content: buildSystemPrompt(stepObj.id, stepObj.label, current.docContext) },
+            ...next.slice(-8).map(m => ({ role: m.role, content: m.content })),
+          ],
         }),
       });
       if (!res.ok) {
