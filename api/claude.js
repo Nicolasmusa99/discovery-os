@@ -6,7 +6,7 @@ export const config = {
   },
 };
 
-// ── PDF size limit (~3 páginas) ───────────────────────────
+// ── PDF size limit ────────────────────────────────────────
 const MAX_PDF_BYTES = 150 * 1024;
 
 function pdfTooLarge(body) {
@@ -42,6 +42,47 @@ function toGeminiMessages(messages, system) {
   return contents;
 }
 
+// ── Llamada a Gemini con retry automático ─────────────────
+async function callGemini(apiKey, body, retries = 3) {
+  const { messages, system, max_tokens } = body;
+  const contents = toGeminiMessages(messages, system);
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents,
+          generationConfig: {
+            maxOutputTokens: max_tokens || 1000,
+            temperature: 0.7,
+          },
+        }),
+      }
+    );
+
+    // Si es 429, esperamos y reintentamos
+    if (response.status === 429) {
+      const waitMs = (attempt + 1) * 5000; // 5s, 10s, 15s
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data?.error?.message || `Error ${response.status}`);
+    }
+
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return text;
+  }
+
+  throw new Error("El servicio está ocupado. Esperá unos segundos e intentá de nuevo.");
+}
+
 // ── Handler ───────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -61,35 +102,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { messages, system, max_tokens } = req.body;
-    const contents = toGeminiMessages(messages, system);
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents,
-          generationConfig: {
-            maxOutputTokens: max_tokens || 1000,
-            temperature: 0.7,
-          },
-        }),
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data?.error?.message || "Error de Gemini" });
-    }
-
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const text = await callGemini(apiKey, req.body);
     return res.status(200).json({
       content: [{ type: "text", text }],
     });
-
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
