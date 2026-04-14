@@ -259,7 +259,7 @@ export default function DiscoveryOS() {
         throw new Error(err?.error?.message || `Error ${res.status}`);
       }
       const data = await res.json();
-      const text = data.content?.[0]?.text || "";
+      const text = data.choices?.[0]?.message?.content || data.content?.[0]?.text || "";
       const isListo = text.includes("[LISTO]");
       const clean = text.replace("[LISTO]", "").trim();
 
