@@ -6,23 +6,6 @@ export const config = {
   },
 };
 
-// ── Rate limiting por IP ──────────────────────────────────
-const RATE_LIMIT = 20;
-const WINDOW_MS  = 60 * 1000;
-const ipMap      = new Map();
-
-function isRateLimited(ip) {
-  const now   = Date.now();
-  const entry = ipMap.get(ip);
-  if (!entry || now > entry.resetAt) {
-    ipMap.set(ip, { count: 1, resetAt: now + WINDOW_MS });
-    return false;
-  }
-  if (entry.count >= RATE_LIMIT) return true;
-  entry.count++;
-  return false;
-}
-
 // ── PDF size limit (~3 páginas) ───────────────────────────
 const MAX_PDF_BYTES = 150 * 1024;
 
@@ -42,32 +25,20 @@ function pdfTooLarge(body) {
 // ── Convertir formato Anthropic → Gemini ─────────────────
 function toGeminiMessages(messages, system) {
   const contents = [];
-
-  // System prompt como primer mensaje de usuario + respuesta vacía del modelo
   if (system) {
-    contents.push({ role: "user",  parts: [{ text: `[INSTRUCCIONES DEL SISTEMA]\n${system}` }] });
+    contents.push({ role: "user",  parts: [{ text: `[INSTRUCCIONES]\n${system}` }] });
     contents.push({ role: "model", parts: [{ text: "Entendido." }] });
   }
-
   for (const msg of messages) {
     const role = msg.role === "assistant" ? "model" : "user";
     let text = "";
-
     if (typeof msg.content === "string") {
       text = msg.content;
     } else if (Array.isArray(msg.content)) {
-      // Extraer solo texto — ignorar bloques de documento para el historial
-      text = msg.content
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("\n");
+      text = msg.content.filter(b => b.type === "text").map(b => b.text).join("\n");
     }
-
-    if (text.trim()) {
-      contents.push({ role, parts: [{ text }] });
-    }
+    if (text.trim()) contents.push({ role, parts: [{ text }] });
   }
-
   return contents;
 }
 
@@ -79,11 +50,6 @@ export default async function handler(req, res) {
 
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || "unknown";
-  if (isRateLimited(ip)) {
-    return res.status(429).json({ error: "Demasiadas solicitudes. Esperá un momento." });
-  }
 
   if (pdfTooLarge(req.body)) {
     return res.status(400).json({ error: "El PDF es demasiado grande. Máximo 3 páginas." });
@@ -119,7 +85,6 @@ export default async function handler(req, res) {
       return res.status(response.status).json({ error: data?.error?.message || "Error de Gemini" });
     }
 
-    // Convertir respuesta Gemini → formato Anthropic que espera el frontend
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
     return res.status(200).json({
       content: [{ type: "text", text }],
