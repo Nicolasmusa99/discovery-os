@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 
-const MAMMOTH_CDN = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
 const ANTHROPIC_API = "/api/claude";
 const ANTHROPIC_HEADERS = {
   "Content-Type": "application/json",
@@ -75,77 +74,8 @@ function generateDoc(initiative) {
 }
 
 // ─── MAMMOTH / FILE UTILS ────────────────────────────────
-let mammothReady = null;
-function loadMammoth() {
-  if (mammothReady) return mammothReady;
-  mammothReady = new Promise((resolve, reject) => {
-    if (window.mammoth) { resolve(window.mammoth); return; }
-    const s = document.createElement("script");
-    s.src = MAMMOTH_CDN;
-    s.onload = () => resolve(window.mammoth);
-    s.onerror = () => reject(new Error("No se pudo cargar mammoth.js"));
-    document.head.appendChild(s);
-  });
-  return mammothReady;
-}
 
-async function fileToBase64(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(",")[1].replace(/\s/g, ""));
-    r.onerror = () => rej(new Error("Error leyendo archivo"));
-    r.readAsDataURL(file);
-  });
-}
-async function fileToText(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result);
-    r.onerror = () => rej(new Error("Error leyendo archivo"));
-    r.readAsText(file, "utf-8");
-  });
-}
 
-async function extractDocumentContext(file) {
-  const name = file.name.toLowerCase();
-  if (file.type === "text/plain" || name.endsWith(".txt")) {
-    const text = await fileToText(file);
-    return text.length > 7000 ? text.slice(0, 7000) + "\n\n[...truncado]" : text;
-  }
-  if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || name.endsWith(".docx")) {
-    const mammoth = await loadMammoth();
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-    const text = result.value || "";
-    if (!text.trim()) throw new Error("El DOCX parece estar vacío o protegido.");
-    return text.length > 7000 ? text.slice(0, 7000) + "\n\n[...truncado]" : text;
-  }
-  if (file.type === "application/pdf" || name.endsWith(".pdf")) {
-    const b64 = await fileToBase64(file);
-    const response = await fetch(ANTHROPIC_API, {
-      method: "POST",
-      headers: ANTHROPIC_HEADERS,
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 2000,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } },
-            { type: "text", text: "Extraé el contenido completo y relevante de este documento para un PM haciendo product discovery. Incluí: contexto del negocio/producto, problemas identificados, métricas, hipótesis, soluciones propuestas, decisiones tomadas, stakeholders, cualquier dato cuantitativo. Sé exhaustivo pero conciso. Sin preámbulo." },
-          ],
-        }],
-      }),
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err?.error?.message || `Error API: ${response.status}`);
-    }
-    const data = await response.json();
-    return data.content?.[0]?.text || "";
-  }
-  throw new Error("Formato no soportado. Usá PDF, DOCX o TXT.");
-}
 
 // ─── ICONS ───────────────────────────────────────────────
 const Ico = {
@@ -193,13 +123,9 @@ export default function DiscoveryOS() {
   const [newTitle, setNewTitle]       = useState("");
   const [showForm, setShowForm]       = useState(false);
   const [docContent, setDocContent]   = useState("");
-  const [uploadedDoc, setUploadedDoc] = useState(null);
-  const [uploadState, setUpState]     = useState("idle");
-  const [uploadError, setUpError]     = useState("");
+  const [contextText, setContextText] = useState(""); // texto pegado por el usuario
   const [copied, setCopied]           = useState(false);
-  const [dragging, setDragging]       = useState(false);
   const endRef  = useRef(null);
-  const fileRef = useRef(null);
   const textRef = useRef(null);
 
   useEffect(() => {
@@ -219,20 +145,6 @@ export default function DiscoveryOS() {
     }));
   };
 
-  // ── File handling ──
-  const handleFile = async (file) => {
-    if (!file) return;
-    setUpState("loading"); setUpError("");
-    try {
-      const context = await extractDocumentContext(file);
-      setUploadedDoc({ name: file.name, context });
-      setUpState("done");
-    } catch (err) {
-      setUpState("error");
-      setUpError(err.message || "Error procesando el archivo.");
-    }
-  };
-
   // ── Start initiative ──
   const startInitiative = () => {
     if (!newTitle.trim()) return;
@@ -242,8 +154,8 @@ export default function DiscoveryOS() {
       createdAt: new Date().toISOString(),
       steps: {},
       completed: false,
-      docContext: uploadedDoc?.context || null,
-      docName: uploadedDoc?.name || null,
+      docContext: contextText.trim() || null,
+      docName: contextText.trim() ? "Contexto manual" : null,
     };
     setInit(prev => [...prev, init]);
     setCurrent(init);
@@ -251,7 +163,7 @@ export default function DiscoveryOS() {
 
     // First message: if doc, bot opens by pre-filling. If no doc, bot asks block questions together.
     const opening = init.docContext
-      ? `Iniciativa: **${init.title}**\n\nLeí el documento. Arrancamos con el bloque **Problema** — te presento lo que entendí y confirmás o ajustás.`
+      ? `Iniciativa: **${init.title}**\n\nTengo el contexto que cargaste. Arrancamos con el bloque **Problema** — te presento lo que entendí y confirmás o ajustás.`
       : `Iniciativa: **${init.title}**\n\nArrancamos. Para el bloque **Problema**, contame:\n\n1. ¿Qué problema observaste?\n2. ¿Cómo lo descubriste?\n3. ¿A quién afecta y con qué frecuencia?\n\nResponde todo junto, con lo que tenés.`;
 
     setMsgs([{ role: "assistant", content: opening }]);
@@ -481,57 +393,25 @@ export default function DiscoveryOS() {
             ))}
           </div>
 
-          {/* Upload */}
+          {/* Context textarea */}
           <div style={{ marginBottom: 32 }}>
-            <p style={{ ...labelStyle, marginBottom: 10 }}>Documento de contexto (recomendado)</p>
+            <p style={{ ...labelStyle, marginBottom: 10 }}>Contexto opcional</p>
             <p style={{ fontSize: 12, color: C.muted, marginBottom: 12, lineHeight: 1.7, fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>
-              Con un doc, el sistema pre-completa cada bloque desde tu material. Solo confirmás o corregís — mucho menos trabajo.
+              Pegá acá el contenido relevante de tu doc, brief o notas. El sistema lo usa para pre-completar cada bloque y hacer menos preguntas.
             </p>
-            {!uploadedDoc && uploadState !== "error" && (
-              <div
-                onDragOver={e => { e.preventDefault(); setDragging(true); }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files?.[0]); }}
-                onClick={() => fileRef.current?.click()}
-                style={{ border: `1px dashed ${dragging ? C.text : C.border}`, padding: "20px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, transition: "all 0.15s", background: dragging ? C.pill : "transparent" }}
-              >
-                <input type="file" ref={fileRef} accept=".pdf,.txt,.docx" onChange={e => handleFile(e.target.files?.[0])} />
-                {uploadState === "loading" ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                    <span style={{ fontSize: 12, color: C.muted }}>Procesando documento...</span>
-                  </div>
-                ) : (
-                  <>
-                    <span style={{ color: C.faint }}><Ico.upload /></span>
-                    <div>
-                      <p style={{ fontSize: 12, color: C.muted, fontFamily: "'IBM Plex Sans',sans-serif" }}>{dragging ? "Soltá aquí" : "PDF, DOCX o TXT — arrastrá o hacé click"}</p>
-                      <p style={{ fontSize: 11, color: C.faint, marginTop: 2, fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>El sistema extrae contexto y reduce las preguntas al mínimo</p>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-            {uploadState === "error" && (
-              <div style={{ border: `1px solid #FCA5A5`, padding: "12px 16px", background: C.errBg, display: "flex", alignItems: "flex-start", gap: 10 }}>
-                <span style={{ color: C.err, marginTop: 1 }}><Ico.warn /></span>
-                <div style={{ flex: 1 }}>
-                  <p style={{ fontSize: 12, color: C.err, fontFamily: "'IBM Plex Sans',sans-serif" }}>{uploadError}</p>
-                  <button onClick={() => { setUpState("idle"); setUpError(""); fileRef.current?.click(); }} style={{ background: "none", border: "none", fontSize: 11, color: C.muted, cursor: "pointer", fontFamily: "inherit", padding: 0, marginTop: 5, textDecoration: "underline" }}>Intentar de nuevo</button>
-                </div>
-                <button onClick={() => { setUpState("idle"); setUpError(""); }} style={{ background: "none", border: "none", color: C.faint, padding: 2, cursor: "pointer" }}><Ico.x /></button>
-              </div>
-            )}
-            {uploadedDoc && (
-              <div style={{ border: `1px solid ${C.border}`, padding: "11px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", background: C.pill }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ color: C.muted }}><Ico.doc /></span>
-                  <div>
-                    <p style={{ fontSize: 12, color: C.text, fontWeight: 500 }}>{uploadedDoc.name}</p>
-                    <p style={{ fontSize: 11, color: C.muted, marginTop: 2, fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>Contexto listo — ~{Math.round(uploadedDoc.context.length / 4)} tokens</p>
-                  </div>
-                </div>
-                <button onClick={() => { setUploadedDoc(null); setUpState("idle"); }} style={{ background: "none", border: "none", color: C.faint, padding: 4, cursor: "pointer" }}><Ico.x /></button>
+            <textarea
+              value={contextText}
+              onChange={e => setContextText(e.target.value)}
+              placeholder="Pegá el texto de tu documento, brief, notas de investigación..."
+              rows={6}
+              style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, color: C.text, padding: "12px 14px", fontSize: 13, fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300, resize: "vertical", lineHeight: 1.65 }}
+              onFocus={e => e.target.style.borderColor = C.text}
+              onBlur={e => e.target.style.borderColor = C.border}
+            />
+            {contextText.trim() && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+                <p style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Sans',sans-serif" }}>~{Math.round(contextText.length / 4)} tokens de contexto</p>
+                <button onClick={() => setContextText("")} style={{ background: "none", border: "none", fontSize: 11, color: C.faint, cursor: "pointer", fontFamily: "inherit" }}>limpiar</button>
               </div>
             )}
           </div>
@@ -554,7 +434,7 @@ export default function DiscoveryOS() {
                     placeholder="Ej: Rediseño del flujo de checkout"
                     style={{ width: "100%", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}`, color: C.text, padding: "7px 0 11px", fontSize: 15, fontFamily: "'IBM Plex Sans',sans-serif" }}
                   />
-                  {uploadedDoc && <p style={{ fontSize: 11, color: C.muted, padding: "8px 0 0", fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>Usará: {uploadedDoc.name}</p>}
+                  {contextText.trim() && <p style={{ fontSize: 11, color: C.muted, padding: "8px 0 0", fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>Con contexto cargado</p>}
                 </div>
                 <div style={{ padding: "12px 18px", display: "flex", gap: 8 }}>
                   <button className="hov-fill" onClick={startInitiative} style={btn("fill")}>Empezar <Ico.arrow /></button>
@@ -585,7 +465,7 @@ export default function DiscoveryOS() {
                         </div>
                         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                           <span style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Sans',sans-serif", fontWeight: 300 }}>{new Date(init.createdAt).toLocaleDateString("es-AR")} · {done}/{STEPS.length} bloques</span>
-                          {init.docName && <span style={{ fontSize: 10, color: C.faint, display: "flex", alignItems: "center", gap: 3 }}><Ico.doc /> {init.docName}</span>}
+                          {init.docContext && <span style={{ fontSize: 10, color: C.faint, display: "flex", alignItems: "center", gap: 3 }}><Ico.doc /> con contexto</span>}
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 14, flexShrink: 0 }}>
@@ -629,9 +509,9 @@ export default function DiscoveryOS() {
           </div>
 
           {/* Doc badge */}
-          {current?.docName && (
+          {current?.docContext && (
             <div style={{ padding: "4px 20px", background: C.pill, borderBottom: `1px solid ${C.border}`, fontSize: 10, color: C.faint, display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-              <Ico.doc /> {current.docName}
+              <Ico.doc /> con contexto
             </div>
           )}
 
