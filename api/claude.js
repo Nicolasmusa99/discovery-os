@@ -1,13 +1,19 @@
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "4mb",
+    },
+  },
+};
+
 // ── Rate limiting por IP ──────────────────────────────────
-// Máximo 20 requests por IP cada 60 segundos
-const RATE_LIMIT   = 20;
-const WINDOW_MS    = 60 * 1000;
-const ipMap        = new Map(); // { ip: { count, resetAt } }
+const RATE_LIMIT = 20;
+const WINDOW_MS  = 60 * 1000;
+const ipMap      = new Map();
 
 function isRateLimited(ip) {
-  const now  = Date.now();
+  const now   = Date.now();
   const entry = ipMap.get(ip);
-
   if (!entry || now > entry.resetAt) {
     ipMap.set(ip, { count: 1, resetAt: now + WINDOW_MS });
     return false;
@@ -17,20 +23,15 @@ function isRateLimited(ip) {
   return false;
 }
 
-// ── Límite de páginas PDF ─────────────────────────────────
-// Si el body contiene un document block tipo PDF, verificamos
-// que el base64 no sea demasiado grande (~3 páginas ≈ 150KB)
-const MAX_PDF_BYTES = 150 * 1024; // 150 KB en base64 ≈ 3 páginas promedio
+// ── PDF size limit (~3 páginas) ───────────────────────────
+const MAX_PDF_BYTES = 150 * 1024;
 
 function pdfTooLarge(body) {
   try {
-    const messages = body?.messages || [];
-    for (const msg of messages) {
-      const content = Array.isArray(msg.content) ? msg.content : [];
-      for (const block of content) {
+    for (const msg of body?.messages || []) {
+      for (const block of Array.isArray(msg.content) ? msg.content : []) {
         if (block?.type === "document" && block?.source?.media_type === "application/pdf") {
-          const bytes = (block.source.data?.length || 0) * 0.75; // base64 → bytes aprox
-          if (bytes > MAX_PDF_BYTES) return true;
+          if ((block.source.data?.length || 0) * 0.75 > MAX_PDF_BYTES) return true;
         }
       }
     }
@@ -40,19 +41,26 @@ function pdfTooLarge(body) {
 
 // ── Handler ───────────────────────────────────────────────
 export default async function handler(req, res) {
+  // CORS headers para que el browser pueda llamar a /api/claude
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Rate limit
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || "unknown";
   if (isRateLimited(ip)) {
-    return res.status(429).json({ error: "Demasiadas solicitudes. Esperá un momento e intentá de nuevo." });
+    return res.status(429).json({ error: "Demasiadas solicitudes. Esperá un momento." });
   }
 
-  // PDF size limit
   if (pdfTooLarge(req.body)) {
-    return res.status(400).json({ error: "El PDF es demasiado grande. Usá documentos de hasta 3 páginas." });
+    return res.status(400).json({ error: "El PDF es demasiado grande. Máximo 3 páginas." });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
